@@ -5,67 +5,86 @@ import { RuntimeModes, setRuntimeMode, getRuntimeMode, isActiveMutationEnabled }
 import { withGameLock } from 'nyx:memory';
 import { Markers } from './markers.js';
 import { ExitMarkers } from './exit-markers.js';
+import { resolveLoggingConfig } from './lib/logging-config.js';
+import { createDiagnosticLogger } from './lib/diagnostic-logger.js';
 
-const fsBinding = internalBinding('fs');
 const processBinding = internalBinding('process');
 
 // d2r-demo expects reveal behavior; keep mutation enabled by default here.
 const ENABLE_ACTIVE_MUTATION = true;
-const FORCE_DEBUG_LOG = false;
+const DEBUG_PANEL_REFRESH_INTERVAL_MS = 100;
 
-function pathJoin(base, leaf) {
-  if (!base || base.length === 0) return leaf;
-  const last = base[base.length - 1];
-  if (last === '\\' || last === '/') return `${base}${leaf}`;
-  return `${base}\\${leaf}`;
+const LOGGING = resolveLoggingConfig({
+  processBinding,
+});
+const DEBUG_LOG = LOGGING.debugLog;
+const UNIT_EXPLORER_PERF_LOG = LOGGING.unitExplorer.perfEnabled;
+const UNIT_EXPLORER_PERF_LOG_FILE = LOGGING.unitExplorer.filePath;
+const scriptLogger = createDiagnosticLogger({
+  name: 'Script',
+  enabled: LOGGING.script.enabled,
+  minLevel: LOGGING.script.minLevel,
+  toConsole: LOGGING.script.toConsole,
+  toFile: LOGGING.script.toFile,
+  filePath: LOGGING.script.filePath,
+});
+const unitExplorerLogger = createDiagnosticLogger({
+  name: 'UnitExplorerPerf',
+  enabled: LOGGING.unitExplorer.perfEnabled,
+  minLevel: LOGGING.unitExplorer.minLevel,
+  toConsole: LOGGING.unitExplorer.toConsole,
+  toFile: LOGGING.unitExplorer.toFile,
+  filePath: LOGGING.unitExplorer.filePath,
+});
+const objectManagerLogger = createDiagnosticLogger({
+  name: 'ObjectManager',
+  enabled: LOGGING.objectManager.enabled,
+  minLevel: LOGGING.objectManager.minLevel,
+  toConsole: LOGGING.objectManager.toConsole,
+  toFile: LOGGING.objectManager.toFile,
+  filePath: LOGGING.objectManager.filePath,
+});
+
+function unitExplorerPerfLogger(...args) {
+  unitExplorerLogger.info(...args);
 }
-
-function detectDebugLogFlag() {
-  const roots = [];
-  try {
-    const scriptsRoot = processBinding.scriptsRoot();
-    if (scriptsRoot) roots.push(scriptsRoot);
-  } catch {}
-  try {
-    const cwd = processBinding.cwd();
-    if (cwd) roots.push(cwd);
-  } catch {}
-
-  const candidates = [];
-  for (const root of roots) {
-    candidates.push(pathJoin(root, 'd2r-demo.debug-log.flag'));
-    candidates.push(pathJoin(root, 'd2r-demo\\debug-log.flag'));
-  }
-
-  for (const candidate of candidates) {
-    try {
-      if (fsBinding.existsSync(candidate)) {
-        return true;
-      }
-    } catch {}
-  }
-  return false;
-}
-
-const DEBUG_LOG = FORCE_DEBUG_LOG || detectDebugLogFlag();
 
 function debugLog(...args) {
   if (DEBUG_LOG) {
-    console.log(...args);
+    scriptLogger.debug(...args);
   }
 }
 
 try {
-  const objMgr = new ObjectManager();
-  const debugPanel = new DebugPanel(objMgr);
+  if (UNIT_EXPLORER_PERF_LOG) {
+    unitExplorerLogger.info(`session_start log_file=${UNIT_EXPLORER_PERF_LOG_FILE}`);
+    if (LOGGING.sourcePath) {
+      unitExplorerLogger.info(`config_source=${LOGGING.sourcePath}`);
+    }
+  }
+  const objMgr = new ObjectManager({
+    logChainIssues: LOGGING.objectManager.chainWarnings,
+    logRiskCircuit: LOGGING.objectManager.riskCircuit,
+    logInfo: (...args) => objectManagerLogger.info(...args),
+    logError: (...args) => objectManagerLogger.error(...args),
+  });
+  const debugPanel = new DebugPanel(objMgr, {
+    perfLog: UNIT_EXPLORER_PERF_LOG,
+    logger: unitExplorerPerfLogger
+  });
   const markers  = new Markers(objMgr);
-  const exitMarkers = new ExitMarkers(objMgr);
+  const exitMarkers = new ExitMarkers(objMgr, {
+    perf: LOGGING.exitMarkers,
+  });
   const desiredRuntimeMode = ENABLE_ACTIVE_MUTATION ? RuntimeModes.ActiveMutation : RuntimeModes.ReadOnlySafe;
   if (!setRuntimeMode(desiredRuntimeMode)) {
     console.warn(`[RuntimeMode] Failed to set mode: ${desiredRuntimeMode}`);
   }
   if (DEBUG_LOG) {
-    console.log('[DebugLog] enabled');
+    scriptLogger.info('debug logging enabled');
+    if (LOGGING.sourcePath) {
+      scriptLogger.info(`config_source=${LOGGING.sourcePath}`);
+    }
   }
   debugLog(`[RuntimeMode] ${getRuntimeMode()}`);
   if (!isActiveMutationEnabled()) {
@@ -108,10 +127,15 @@ try {
   let revealDisabled = !isActiveMutationEnabled();
   let revealFailureStreak = 0;
   let wasInGame = !!objMgr.me;
+  let lastDebugPanelRefresh = 0;
   setInterval(() => {
     objMgr.tick();
     exitMarkers.tick();
-    debugPanel.refresh();
+    const now = Date.now();
+    if (now - lastDebugPanelRefresh >= DEBUG_PANEL_REFRESH_INTERVAL_MS) {
+      debugPanel.refresh();
+      lastDebugPanelRefresh = now;
+    }
 
     if (!revealDisabled && !isActiveMutationEnabled()) {
       revealDisabled = true;
@@ -135,7 +159,7 @@ try {
     }
 
     if (!me && revealed_levels.length > 0) {
-      console.log("Resetting revealed levels");
+      debugLog("Resetting revealed levels");
       revealed_levels = [];
       revealFailureStreak = 0;
     }
@@ -144,7 +168,7 @@ try {
       if (currentLevelId !== undefined && !revealed_levels.includes(currentLevelId)) {
         withGameLock(_ => {
           if (revealLevel(currentLevelId)) {
-            console.log(`Revealed level ${currentLevelId}`);
+            debugLog(`Revealed level ${currentLevelId}`);
             revealed_levels.push(currentLevelId);
             revealFailureStreak = 0;
           } else {
