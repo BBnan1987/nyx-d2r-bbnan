@@ -3,12 +3,16 @@
 #include "d2r_methods.h"
 #include "offsets.h"
 
+#include <Windows.h>
+
 #include <nyx/env.h>
 #include <nyx/extension.h>
 #include <nyx/isolate_data.h>
 #include <nyx/util.h>
 
 #include <dolos/pipe_log.h>
+
+#include <string>
 
 namespace d2r {
 
@@ -20,10 +24,72 @@ using v8::HandleScope;
 using v8::Isolate;
 using v8::Local;
 using v8::ObjectTemplate;
+using v8::String;
 using v8::Value;
 
+namespace {
+constexpr ULONGLONG kAutomapModeCacheMs = 50;
+ULONGLONG s_automap_mode_cache_ts = 0;
+uint32_t s_automap_mode_cache_value = 0;
+bool s_automap_mode_cache_valid = false;
+
+uint32_t GetAutomapModeCached(bool* from_cache = nullptr) {
+  ULONGLONG now = GetTickCount64();
+  if (s_automap_mode_cache_valid && now - s_automap_mode_cache_ts <= kAutomapModeCacheMs) {
+    if (from_cache) *from_cache = true;
+    return s_automap_mode_cache_value;
+  }
+
+  s_automap_mode_cache_value = AutoMapPanel_GetMode();
+  s_automap_mode_cache_ts = now;
+  s_automap_mode_cache_valid = true;
+  if (from_cache) *from_cache = false;
+  return s_automap_mode_cache_value;
+}
+
+bool ParseRuntimeMode(Isolate* isolate, Local<Value> value, RuntimeMode* out_mode) {
+  if (out_mode == nullptr || value.IsEmpty()) {
+    return false;
+  }
+
+  if (value->IsUint32()) {
+    uint32_t mode_raw = value->Uint32Value(isolate->GetCurrentContext()).FromMaybe(0);
+    if (mode_raw == static_cast<uint32_t>(RuntimeMode::ReadOnlySafe)) {
+      *out_mode = RuntimeMode::ReadOnlySafe;
+      return true;
+    }
+    if (mode_raw == static_cast<uint32_t>(RuntimeMode::ActiveMutation)) {
+      *out_mode = RuntimeMode::ActiveMutation;
+      return true;
+    }
+    return false;
+  }
+
+  if (!value->IsString()) {
+    return false;
+  }
+
+  String::Utf8Value utf8(isolate, value);
+  if (*utf8 == nullptr) {
+    return false;
+  }
+
+  std::string mode(*utf8);
+  if (mode == "read_only_safe" || mode == "safe") {
+    *out_mode = RuntimeMode::ReadOnlySafe;
+    return true;
+  }
+  if (mode == "active_mutation" || mode == "active") {
+    *out_mode = RuntimeMode::ActiveMutation;
+    return true;
+  }
+
+  return false;
+}
+}  // namespace
+
 void AutomapGetMode(const FunctionCallbackInfo<Value>& args) {
-  args.GetReturnValue().Set(AutoMapPanel_GetMode());
+  args.GetReturnValue().Set(GetAutomapModeCached());
 }
 
 void WorldToAutomap(const FunctionCallbackInfo<Value>& args) {
@@ -62,7 +128,7 @@ void WorldToAutomap(const FunctionCallbackInfo<Value>& args) {
     return;
   }
 
-  uint32_t mode = AutoMapPanel_GetMode();
+  uint32_t mode = GetAutomapModeCached();
   PIPE_LOG_TRACE("mode = {}", mode);
   if (mode == 1) {
     // automap is in corner
@@ -152,6 +218,28 @@ void RevealLevel(const FunctionCallbackInfo<Value>& args) {
   args.GetReturnValue().Set(RevealLevelById(level_id));
 }
 
+static void GetRuntimeModeBinding(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  const char* mode_name = GetRuntimeModeName(GetRuntimeMode());
+  args.GetReturnValue().Set(String::NewFromUtf8(isolate, mode_name, v8::NewStringType::kNormal).ToLocalChecked());
+}
+
+static void SetRuntimeModeBinding(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  RuntimeMode mode = RuntimeMode::ReadOnlySafe;
+  if (args.Length() < 1 || !ParseRuntimeMode(isolate, args[0], &mode)) {
+    PIPE_LOG_WARN("[RuntimeMode] Invalid mode argument to setRuntimeMode");
+    args.GetReturnValue().Set(false);
+    return;
+  }
+  SetRuntimeMode(mode);
+  args.GetReturnValue().Set(true);
+}
+
+static void IsActiveMutationEnabledBinding(const FunctionCallbackInfo<Value>& args) {
+  args.GetReturnValue().Set(IsActiveMutationEnabled());
+}
+
 // will break on patch, look at the end of GetPlayerUnit for decryption method
 static void GetPlayerIdByIndex(const FunctionCallbackInfo<Value>& args) {
   Isolate* isolate = args.GetIsolate();
@@ -198,6 +286,9 @@ void InitD2RBinding(nyx::IsolateData* isolate_data, Local<ObjectTemplate> target
   nyx::SetMethod(isolate, target, "automapGetMode", AutomapGetMode);
   nyx::SetMethod(isolate, target, "worldToAutomap", WorldToAutomap);
   nyx::SetMethod(isolate, target, "revealLevel", RevealLevel);
+  nyx::SetMethod(isolate, target, "getRuntimeMode", GetRuntimeModeBinding);
+  nyx::SetMethod(isolate, target, "setRuntimeMode", SetRuntimeModeBinding);
+  nyx::SetMethod(isolate, target, "isActiveMutationEnabled", IsActiveMutationEnabledBinding);
   nyx::SetMethod(isolate, target, "getPlayerIdByIndex", GetPlayerIdByIndex);
   nyx::SetMethod(isolate, target, "getLocalPlayerIndex", GetLocalPlayerIndex);
   nyx::SetMethod(isolate, target, "getClientSideUnitHashTableAddress", GetClientSideUnitHashTableAddress);

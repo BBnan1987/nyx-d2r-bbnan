@@ -18,8 +18,16 @@ declare module 'd2r' {
   export { ObjectManager } from 'd2r/object-manager';
   export { DebugPanel } from 'd2r/debug-panel';
 
+  export const RuntimeModes: {
+    readonly ReadOnlySafe: 'read_only_safe';
+    readonly ActiveMutation: 'active_mutation';
+  };
+
   // Binding function
   export function revealLevel(levelId: number): boolean;
+  export function getRuntimeMode(): 'read_only_safe' | 'active_mutation';
+  export function setRuntimeMode(mode: 'read_only_safe' | 'active_mutation' | 'safe' | 'active' | 0 | 1): boolean;
+  export function isActiveMutationEnabled(): boolean;
 }
 
 // Support nyx: prefix

@@ -33,6 +33,11 @@ declare module 'd2r/object-manager' {
      */
     readonly gameLockTime: string;
 
+    /**
+     * Risk circuit status for mutation-sensitive features.
+     */
+    isRiskCircuitTripped(): boolean;
+
     // Event emitter methods
     on(event: 'unitAdded', listener: (unit: Unit, type: number) => void): this;
     on(event: 'unitRemoved', listener: (unit: Unit, type: number) => void): this;

@@ -25,10 +25,12 @@ class RetcheckBypass {
 
   static bool AddAddress(uintptr_t return_address);
 
-  static void SwapIn();
-  static void SwapOut();
+  static bool SwapIn();
+  static bool SwapOut();
 
+#ifdef NYX_D2R_DEBUG_RETCHECK
   static void ValidateReturnAddressValid(uintptr_t retaddr);
+#endif
 };
 
 static NYX_NOINLINE void* GetCallSite() {

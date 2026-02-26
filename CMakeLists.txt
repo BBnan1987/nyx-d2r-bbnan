@@ -12,6 +12,10 @@ project(nyx_d2r LANGUAGES C CXX ASM_MASM)
 add_subdirectory(tools)
 add_subdirectory(vendor)
 
+# Security/hardening profile toggles.
+option(NYX_D2R_ENABLE_PE_DUMP "Enable writing PE dump during offset scan" OFF)
+option(NYX_D2R_ENABLE_RETCHECK_DEBUG "Enable verbose retcheck diagnostics" OFF)
+
 set(NYX_D2R_SOURCES
   src/d2r_binding.cc
   src/d2r_game.cc
@@ -25,7 +29,16 @@ set(NYX_D2R_SOURCES
 add_library(nyx.d2r SHARED ${NYX_D2R_SOURCES})
 
 # Enable ImGui <-> V8 helpers defined in vendor/nyx/vendor/imgui/imconfig.h
-target_compile_definitions(nyx.d2r PRIVATE NYX_IMGUI_V8_INTEGRATION)
+target_compile_definitions(nyx.d2r PRIVATE
+  NYX_IMGUI_V8_INTEGRATION
+  $<$<BOOL:${NYX_D2R_ENABLE_PE_DUMP}>:NYX_D2R_PE_DUMP>
+  $<$<BOOL:${NYX_D2R_ENABLE_RETCHECK_DEBUG}>:NYX_D2R_DEBUG_RETCHECK>
+  $<$<CONFIG:Debug>:NYX_D2R_DEV_BUILD=1>
+  $<$<NOT:$<CONFIG:Debug>>:NYX_D2R_HARDENED_BUILD=1>
+)
+
+message(STATUS "NYX_D2R_ENABLE_PE_DUMP=${NYX_D2R_ENABLE_PE_DUMP}")
+message(STATUS "NYX_D2R_ENABLE_RETCHECK_DEBUG=${NYX_D2R_ENABLE_RETCHECK_DEBUG}")
 
 target_external_js_sources(nyx.d2r lib ${CMAKE_CURRENT_BINARY_DIR}/d2r_builtins.cc d2r_builtins)
 

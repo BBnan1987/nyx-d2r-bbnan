@@ -6,6 +6,7 @@
 #include <dolos/pipe_log.h>
 #include <nyx/util.h>
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <vector>
 
@@ -17,6 +18,8 @@ static RetCheckData::ReturnAddresses s_replacement_table;
 static uintptr_t s_original_address_table_ptr = 0;
 static uint64_t s_original_image_base = 0;
 static uint64_t s_original_image_size = 0;
+static std::atomic<DWORD> s_swap_owner_thread_id{0};
+static thread_local uint32_t s_thread_swap_depth = 0;
 
 static const uint8_t sbox_30[16] = {
     0x05, 0x01, 0x0D, 0x09, 0x04, 0x02, 0x0B, 0x03, 0x0A, 0x07, 0x0C, 0x0E, 0x00, 0x06, 0x08, 0x0F};
@@ -62,6 +65,27 @@ static uint32_t deobfuscate_return_address(uint32_t obfuscated, uint32_t constan
 
 static uint32_t get_constant_at_index(uint8_t* constants, size_t index) {
   return *reinterpret_cast<uint32_t*>(&constants[index]);
+}
+
+static bool RestoreOriginalRetcheckState() {
+  RetCheckData* data_ptr = kCheckData;
+  if (data_ptr == nullptr || data_ptr->range == nullptr || s_original_address_table_ptr == 0) {
+    return false;
+  }
+  data_ptr->addresses = reinterpret_cast<RetCheckData::ReturnAddresses*>(s_original_address_table_ptr);
+  data_ptr->range->base = reinterpret_cast<void*>(s_original_image_base);
+  data_ptr->range->size = s_original_image_size;
+  return true;
+}
+
+static void ForceRestoreRetcheckState(const char* reason) {
+  if (!RestoreOriginalRetcheckState()) {
+    PIPE_LOG_ERROR("RetcheckBypass: force-restore failed ({})", reason);
+  } else {
+    PIPE_LOG_WARN("RetcheckBypass: force-restored original state ({})", reason);
+  }
+  s_thread_swap_depth = 0;
+  s_swap_owner_thread_id.store(0, std::memory_order_release);
 }
 
 bool RetcheckBypass::Initialize() {
@@ -114,10 +138,12 @@ bool RetcheckBypass::Shutdown() {
     return false;
   }
 
-  RetCheckData* data_ptr = kCheckData;
-  data_ptr->addresses = reinterpret_cast<RetCheckData::ReturnAddresses*>(s_original_address_table_ptr);
-  data_ptr->range->base = reinterpret_cast<void*>(s_original_image_base);
-  data_ptr->range->size = s_original_image_size;
+  if (s_thread_swap_depth != 0 || s_swap_owner_thread_id.load(std::memory_order_acquire) != 0) {
+    ForceRestoreRetcheckState("shutdown");
+  } else if (!RestoreOriginalRetcheckState()) {
+    PIPE_LOG_ERROR("RetcheckBypass: failed to restore original table during shutdown");
+    return false;
+  }
 
   s_patched_array.clear();
   s_original_address_table_ptr = 0;
@@ -128,18 +154,57 @@ bool RetcheckBypass::Shutdown() {
   return true;
 }
 
-void RetcheckBypass::SwapIn() {
+bool RetcheckBypass::SwapIn() {
+  if (s_patched_array.empty() || s_original_address_table_ptr == 0 || s_original_image_size == 0) {
+    PIPE_LOG_ERROR("RetcheckBypass: SwapIn called before initialization");
+    return false;
+  }
+
+  DWORD tid = GetCurrentThreadId();
+  if (s_thread_swap_depth == 0) {
+    DWORD expected = 0;
+    if (!s_swap_owner_thread_id.compare_exchange_strong(expected, tid, std::memory_order_acq_rel)) {
+      if (expected != tid) {
+        PIPE_LOG_ERROR("RetcheckBypass: SwapIn denied, active on another thread (owner={}, current={})", expected, tid);
+        return false;
+      }
+    }
+  }
+  ++s_thread_swap_depth;
+  if (s_thread_swap_depth > 1) {
+    return true;
+  }
+
   RetCheckData* data_ptr = kCheckData;
+  if (data_ptr == nullptr || data_ptr->range == nullptr) {
+    ForceRestoreRetcheckState("SwapIn invalid check data");
+    return false;
+  }
   data_ptr->range->base = 0;
   data_ptr->range->size = std::numeric_limits<int64_t>::max();
   data_ptr->addresses = &s_replacement_table;
+  return true;
 }
 
-void RetcheckBypass::SwapOut() {
-  RetCheckData* data_ptr = kCheckData;
-  data_ptr->addresses = reinterpret_cast<RetCheckData::ReturnAddresses*>(s_original_address_table_ptr);
-  data_ptr->range->base = reinterpret_cast<void*>(s_original_image_base);
-  data_ptr->range->size = s_original_image_size;
+bool RetcheckBypass::SwapOut() {
+  if (s_thread_swap_depth == 0) {
+    ForceRestoreRetcheckState("SwapOut underflow");
+    return false;
+  }
+
+  --s_thread_swap_depth;
+  if (s_thread_swap_depth > 0) {
+    return true;
+  }
+
+  bool ok = RestoreOriginalRetcheckState();
+  if (!ok) {
+    ForceRestoreRetcheckState("SwapOut restore failure");
+    return false;
+  }
+
+  s_swap_owner_thread_id.store(0, std::memory_order_release);
+  return true;
 }
 
 bool RetcheckBypass::AddAddress(uintptr_t return_address) {
@@ -164,6 +229,7 @@ bool RetcheckBypass::AddAddress(uintptr_t return_address) {
   return true;
 }
 
+#ifdef NYX_D2R_DEBUG_RETCHECK
 void RetcheckBypass::ValidateReturnAddressValid(uintptr_t retaddr) {
   RetCheckData* data = kCheckData;
   const uintptr_t image_base = reinterpret_cast<uintptr_t>(data->range->base);
@@ -275,5 +341,6 @@ void RetcheckBypass::ValidateReturnAddressValid(uintptr_t retaddr) {
     PIPE_LOG_TRACE("  4. Return address is invalid");
   }
 }
+#endif  // NYX_D2R_DEBUG_RETCHECK
 
 }  // namespace d2r

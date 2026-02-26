@@ -90,6 +90,8 @@ constexpr std::size_t kOffsetCount = 0
     ;
 
 bool InitializeOffsets();
+bool InitializePlayerIdConstants();
+bool SavePlayerIdConstantsToCache(uint32_t xor_const, uint32_t add_const);
 bool ValidateOffsets();
 
 struct OffsetInfo {

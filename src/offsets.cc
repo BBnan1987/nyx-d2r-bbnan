@@ -6,8 +6,11 @@
 #include <dolos/pe_builder.h>
 #include <dolos/pipe_log.h>
 
+#include <Windows.h>
+
 #include <algorithm>
 #include <cstddef>
+#include <fstream>
 #include <string>
 
 namespace d2r {
@@ -91,6 +94,87 @@ void LogMissingOffsets(const std::vector<SignatureDef>& signatures) {
   }
 }
 
+constexpr std::uint32_t kPlayerIdCacheMagic = 0x43444950;  // "PIDC"
+constexpr std::uint32_t kPlayerIdCacheVersion = 2;
+
+struct PlayerIdConstantsCacheFile {
+  std::uint32_t magic;
+  std::uint32_t version;
+  std::uint64_t exe_hash;
+  std::uint32_t xor_const;
+  std::uint32_t add_const;
+};
+
+std::string GetPlayerIdConstantsCachePath(OffsetCacheManager& cache_mgr, std::uint64_t exe_hash) {
+  std::string path = cache_mgr.GetCachePath(exe_hash);
+  if (path.size() > 4 && path.substr(path.size() - 4) == ".bin") {
+    path = path.substr(0, path.size() - 4) + ".playerid.bin";
+  } else {
+    path += ".playerid.bin";
+  }
+  return path;
+}
+
+bool LoadPlayerIdConstantsFromCache(OffsetCacheManager& cache_mgr, std::uint64_t exe_hash) {
+  const std::string cache_path = GetPlayerIdConstantsCachePath(cache_mgr, exe_hash);
+  std::ifstream file(cache_path, std::ios::binary);
+  if (!file) {
+    return false;
+  }
+
+  PlayerIdConstantsCacheFile data{};
+  file.read(reinterpret_cast<char*>(&data), sizeof(data));
+  if (!file) {
+    PIPE_LOG_WARN("[PlayerIdConstants] Failed reading cache file {}", cache_path);
+    return false;
+  }
+
+  if (data.magic != kPlayerIdCacheMagic || data.version != kPlayerIdCacheVersion || data.exe_hash != exe_hash) {
+    return false;
+  }
+
+  PlayerIdXorConst = data.xor_const;
+  PlayerIdAddConst = data.add_const;
+  PIPE_LOG_INFO("[PlayerIdConstants] Loaded cached XOR=0x{:08X} ADD=0x{:08X}", PlayerIdXorConst, PlayerIdAddConst);
+  return true;
+}
+
+bool SavePlayerIdConstantsToCacheInternal(OffsetCacheManager& cache_mgr,
+                                          std::uint64_t exe_hash,
+                                          std::uint32_t xor_const,
+                                          std::uint32_t add_const) {
+  if (exe_hash == 0) {
+    return false;
+  }
+  if (!cache_mgr.EnsureCacheDirectory()) {
+    return false;
+  }
+
+  const std::string cache_path = GetPlayerIdConstantsCachePath(cache_mgr, exe_hash);
+  std::ofstream file(cache_path, std::ios::binary | std::ios::trunc);
+  if (!file) {
+    PIPE_LOG_WARN("[PlayerIdConstants] Failed creating cache file {}", cache_path);
+    return false;
+  }
+
+  PlayerIdConstantsCacheFile data{
+      kPlayerIdCacheMagic,
+      kPlayerIdCacheVersion,
+      exe_hash,
+      xor_const,
+      add_const,
+  };
+
+  file.write(reinterpret_cast<const char*>(&data), sizeof(data));
+  if (!file) {
+    PIPE_LOG_WARN("[PlayerIdConstants] Failed writing cache file {}", cache_path);
+    return false;
+  }
+
+  PIPE_LOG_DEBUG("[PlayerIdConstants] Cached XOR=0x{:08X} ADD=0x{:08X}", xor_const, add_const);
+  return true;
+}
+
 }  // namespace
 
 bool InitializeOffsets() {
@@ -141,6 +225,7 @@ bool InitializeOffsets() {
     PIPE_LOG_WARN("[Offsets] Not all patterns were found");
   }
 
+#ifdef NYX_D2R_PE_DUMP
   if (exe_hash != 0) {
     std::string dump_path = cache_mgr.GetCachePath(exe_hash);
     if (dump_path.size() > 4 && dump_path.substr(dump_path.size() - 4) == ".bin") {
@@ -157,6 +242,7 @@ bool InitializeOffsets() {
       PIPE_LOG_WARN("[Offsets] Failed to write PE dump");
     }
   }
+#endif  // NYX_D2R_PE_DUMP
 
   std::size_t found_count = 0;
   for (const auto& sig : signatures) {
@@ -188,6 +274,34 @@ bool ValidateOffsets() {
 #undef VALIDATE_OFFSET
 
   return true;
+}
+
+bool InitializePlayerIdConstants() {
+  // Prefer validated cached constants by exe hash.
+  //
+  // We intentionally avoid trusting an initialization-time pattern scan result
+  // here because false positives can select invalid immediates and destabilize
+  // later calls. Runtime code validates candidates against real unit lookups
+  // and persists only validated values.
+
+  OffsetCacheManager cache_mgr;
+  std::uint64_t exe_hash = cache_mgr.ComputeExecutableHash();
+  if (exe_hash != 0 && LoadPlayerIdConstantsFromCache(cache_mgr, exe_hash)) {
+    return true;
+  }
+
+  // Bootstrap constants: runtime validation/recovery may replace these and
+  // cache validated values for future launches.
+  PlayerIdXorConst = 0x8633C320;
+  PlayerIdAddConst = 0x53D5CDD3;
+  PIPE_LOG_WARN("[PlayerIdConstants] No validated cache found, using bootstrap constants");
+  return true;
+}
+
+bool SavePlayerIdConstantsToCache(uint32_t xor_const, uint32_t add_const) {
+  OffsetCacheManager cache_mgr;
+  std::uint64_t exe_hash = cache_mgr.ComputeExecutableHash();
+  return SavePlayerIdConstantsToCacheInternal(cache_mgr, exe_hash, xor_const, add_const);
 }
 
 void GetOffsetInfo(OffsetInfo* out, std::size_t count) {

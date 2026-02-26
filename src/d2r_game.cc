@@ -23,6 +23,10 @@ bool D2rGame::OnInitialize() {
     PIPE_LOG_WARN("[nyx.d2r] Some offsets could not be resolved - features may be limited");
   }
 
+  if (!InitializePlayerIdConstants()) {
+    PIPE_LOG_WARN("[nyx.d2r] Player ID constants not found - GetPlayerId may not work");
+  }
+
   if (!RetcheckBypass::Initialize()) {
     PIPE_LOG_WARN("[nyx.d2r] Failed to install retcheck bypass - game function calls may crash");
   }

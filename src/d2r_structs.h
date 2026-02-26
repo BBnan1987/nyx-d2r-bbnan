@@ -942,4 +942,10 @@ inline uint32_t (*EncTransformValue)(uint32_t*);
 inline uintptr_t* EncEncryptionKeys;
 inline uint32_t* PlayerIndexToIDEncryptedTable;
 
+// Player ID decryption constants — extracted from game code at init time.
+// These replace hardcoded 0x8633C320 / 0x53D5CDD3 which break on patches.
+// Populated by InitializePlayerIdConstants() via byte-pattern scan of .text section.
+inline uint32_t PlayerIdXorConst = 0;
+inline uint32_t PlayerIdAddConst = 0;
+
 }  // namespace d2r
